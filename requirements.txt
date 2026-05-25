@@ -1,0 +1,24 @@
+# Core ML
+torch>=2.1.0
+transformers>=4.38.0
+accelerate>=0.27.0
+peft>=0.8.0
+bitsandbytes>=0.42.0
+trl>=0.8.0
+datasets>=2.16.0
+
+# Data processing
+scipy>=1.11.0
+numpy>=1.24.0
+
+# Evaluation
+evaluate>=0.4.0
+
+# Inference / export
+gguf>=0.6.0
+llama-cpp-python>=0.2.50
+
+# Utilities
+tqdm>=4.64.0
+pyyaml>=6.0
+wandb>=0.16.0

@@ -1,0 +1,50 @@
+datasets:
+  the_stack_v2:
+    enabled: true
+    split: "train"
+    languages:
+      - "C++"
+      - "Lua"
+    max_samples_per_language: 250000
+    deduplicate: true
+    min_size_bytes: 100
+    max_size_bytes: 50000
+    filters:
+      - filter_name: "remove_generated"
+        enabled: true
+      - filter_name: "remove_duplicate_code"
+        enabled: true
+      - filter_name: "clean_cpp_comments"
+        enabled: false
+
+  code_alpaca:
+    enabled: true
+    name: "yahma/alpaca-cleaned"
+    max_samples: 20000
+
+  self_instruct:
+    enabled: true
+    max_instruction_pairs: 100000
+    synthesis_ratio: 0.3
+    templates:
+      - "Write a {language} function that {task}"
+      - "Implement a {language} class for {task}"
+      - "Create a {language} program that {task}"
+
+output:
+  train_file: "./data/processed/train_dataset.parquet"
+  eval_file: "./data/processed/eval_dataset.parquet"
+  eval_split_ratio: 0.05
+  cache_dir: "./data/cache"
+
+preprocessing:
+  max_length: 2048
+  truncation: true
+  instruction_format: >-
+    ### Instruction
+    {instruction}
+
+    ### Response
+    ```{language}
+    {code}
+    ```

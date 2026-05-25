@@ -5,27 +5,18 @@ datasets:
     languages:
       - "C++"
       - "Lua"
-    max_samples_per_language: 250000
-    deduplicate: true
+    max_samples_per_language: 500
+    deduplicate: false
     min_size_bytes: 100
-    max_size_bytes: 50000
-    filters:
-      - filter_name: "remove_generated"
-        enabled: true
-      - filter_name: "remove_duplicate_code"
-        enabled: true
-      - filter_name: "clean_cpp_comments"
-        enabled: false
+    max_size_bytes: 10000
 
   code_alpaca:
-    enabled: true
-    name: "yahma/alpaca-cleaned"
-    max_samples: 20000
+    enabled: false
 
   self_instruct:
     enabled: true
-    max_instruction_pairs: 100000
-    synthesis_ratio: 0.3
+    max_instruction_pairs: 1000
+    synthesis_ratio: 1.0
     templates:
       - "Write a {language} function that {task}"
       - "Implement a {language} class for {task}"
@@ -38,7 +29,7 @@ output:
   cache_dir: "./data/cache"
 
 preprocessing:
-  max_length: 2048
+  max_length: 512
   truncation: true
   instruction_format: >-
     ### Instruction

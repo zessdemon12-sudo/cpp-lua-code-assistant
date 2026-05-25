@@ -6,16 +6,16 @@ from pathlib import Path
 
 import torch
 import transformers
-from datasets import load_dataset, Dataset
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from datasets import Dataset
+from peft import LoraConfig, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    BitsAndBytesConfig,
+    Trainer,
     TrainingArguments,
+    DataCollatorForSeq2Seq,
     set_seed,
 )
-from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,8 +29,7 @@ HAS_CUDA = torch.cuda.is_available()
 
 
 def load_config():
-    config_path = ROOT / "config" / "training_config.yaml"
-    with open(config_path) as f:
+    with open(ROOT / "config" / "training_config.yaml") as f:
         return yaml.safe_load(f)
 
 
@@ -41,7 +40,6 @@ def load_data():
 
     if not train_file.exists():
         logger.error(f"Training data not found at {train_file}")
-        logger.error("Run `python data/collect_data.py` and `python data/generate_instructions.py` first.")
         sys.exit(1)
 
     train_ds = Dataset.from_parquet(str(train_file))
@@ -54,51 +52,57 @@ def load_data():
     return train_ds, eval_ds
 
 
-def setup_tokenizer(model_id):
+def tokenize_function(examples, tokenizer, max_length):
+    texts = examples["text"]
+    tokenized = tokenizer(
+        texts,
+        truncation=True,
+        padding=False,
+        max_length=max_length,
+    )
+    tokenized["labels"] = tokenized["input_ids"].copy()
+    return tokenized
+
+
+def main():
+    set_seed(42)
+    cfg = load_config()
+    train_cfg = cfg["training"]
+
+    logger.info("=== Loading Data ===")
+    train_ds, eval_ds = load_data()
+
+    logger.info("=== Setting up Tokenizer ===")
+    model_id = cfg["model"]["base_model_id"]
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.pad_token_id = tokenizer.eos_token_id
-    tokenizer.truncation_side = "left"
-    return tokenizer
 
+    logger.info("=== Tokenizing Dataset ===")
+    max_len = train_cfg["max_seq_length"]
+    train_ds = train_ds.map(
+        lambda x: tokenize_function(x, tokenizer, max_len),
+        batched=True,
+        remove_columns=train_ds.column_names,
+    )
+    if eval_ds:
+        eval_ds = eval_ds.map(
+            lambda x: tokenize_function(x, tokenizer, max_len),
+            batched=True,
+            remove_columns=eval_ds.column_names,
+        )
 
-def setup_model(cfg, tokenizer):
-    model_cfg = cfg["model"]
-    qlora_cfg = cfg["qlora"]
+    logger.info("=== Loading Model ===")
+    dtype = getattr(torch, cfg["model"]["torch_dtype"])
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        torch_dtype=dtype,
+        trust_remote_code=True,
+    )
+
+    logger.info("=== Applying LoRA ===")
     lora_cfg = cfg["lora"]
-
-    logger.info(f"Loading base model: {model_cfg['base_model_id']}")
-    logger.info(f"Device: {'CUDA' if HAS_CUDA else 'CPU'}")
-
-    dtype = getattr(torch, model_cfg["torch_dtype"])
-
-    if HAS_CUDA and qlora_cfg["enabled"]:
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=qlora_cfg["load_in_4bit"],
-            bnb_4bit_quant_type=qlora_cfg["quant_type"],
-            bnb_4bit_compute_dtype=getattr(torch, qlora_cfg["bnb_4bit_compute_dtype"]),
-            bnb_4bit_use_double_quant=qlora_cfg["bnb_4bit_use_double_quant"],
-        )
-        model = AutoModelForCausalLM.from_pretrained(
-            model_cfg["base_model_id"],
-            quantization_config=bnb_config,
-            torch_dtype=dtype,
-            attn_implementation=model_cfg["attn_implementation"],
-            use_cache=model_cfg["use_cache"],
-            trust_remote_code=True,
-            device_map="auto",
-        )
-        model = prepare_model_for_kbit_training(model)
-    else:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_cfg["base_model_id"],
-            torch_dtype=dtype,
-            attn_implementation=model_cfg["attn_implementation"],
-            use_cache=model_cfg["use_cache"],
-            trust_remote_code=True,
-        )
-
     peft_config = LoraConfig(
         r=lora_cfg["r"],
         lora_alpha=lora_cfg["lora_alpha"],
@@ -107,31 +111,9 @@ def setup_model(cfg, tokenizer):
         bias=lora_cfg["bias"],
         task_type=lora_cfg["task_type"],
     )
-
     model = get_peft_model(model, peft_config)
     model.print_trainable_parameters()
 
-    return model
-
-
-def formatting_func(example):
-    return example["text"]
-
-
-def main():
-    set_seed(42)
-    cfg = load_config()
-
-    logger.info("=== Loading Data ===")
-    train_ds, eval_ds = load_data()
-
-    logger.info("=== Setting up Tokenizer ===")
-    tokenizer = setup_tokenizer(cfg["model"]["base_model_id"])
-
-    logger.info("=== Setting up Model ===")
-    model = setup_model(cfg, tokenizer)
-
-    train_cfg = cfg["training"]
     output_dir = ROOT / train_cfg["output_dir"]
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -141,7 +123,6 @@ def main():
         per_device_train_batch_size=train_cfg["per_device_train_batch_size"],
         per_device_eval_batch_size=train_cfg["per_device_eval_batch_size"],
         gradient_accumulation_steps=train_cfg["gradient_accumulation_steps"],
-        gradient_checkpointing=train_cfg["gradient_checkpointing"],
         learning_rate=train_cfg["learning_rate"],
         lr_scheduler_type=train_cfg["lr_scheduler_type"],
         warmup_ratio=train_cfg["warmup_ratio"],
@@ -151,49 +132,41 @@ def main():
         save_steps=train_cfg["save_steps"],
         eval_steps=train_cfg["eval_steps"],
         save_total_limit=train_cfg["save_total_limit"],
-        load_best_model_at_end=train_cfg["load_best_model_at_end"],
-        metric_for_best_model=train_cfg["metric_for_best_model"],
-        greater_is_better=train_cfg["greater_is_better"],
-        bf16=train_cfg["bf16"] and HAS_CUDA,
-        tf32=train_cfg["tf32"] and HAS_CUDA,
-        fp16=not HAS_CUDA,
-        dataloader_num_workers=train_cfg["dataloader_num_workers"],
-        remove_unused_columns=train_cfg["remove_unused_columns"],
-        report_to="none",
-        run_name=train_cfg["run_name"],
-        ddp_find_unused_parameters=False if torch.cuda.device_count() > 1 else None,
         logging_strategy="steps",
         save_strategy="steps",
         eval_strategy="steps" if eval_ds is not None else "no",
+        bf16=False,
+        tf32=False,
+        fp16=False,
+        dataloader_num_workers=0,
+        remove_unused_columns=False,
+        report_to="none",
+        run_name=train_cfg["run_name"],
     )
 
-    trainer = SFTTrainer(
-        model=model,
+    data_collator = DataCollatorForSeq2Seq(
         tokenizer=tokenizer,
+        pad_to_multiple_of=8,
+        padding=True,
+    )
+
+    trainer = Trainer(
+        model=model,
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=eval_ds,
-        formatting_func=formatting_func,
-        max_seq_length=train_cfg["max_seq_length"],
-        packing=train_cfg["packing"],
-        data_collator=transformers.DataCollatorForSeq2Seq(
-            tokenizer=tokenizer,
-            pad_to_multiple_of=8,
-            padding=True,
-        ),
+        data_collator=data_collator,
     )
 
     logger.info("=== Starting Training ===")
-    logger.info(f"Total trainable params: {model.num_parameters(only_trainable=True):,}")
     trainer.train()
 
-    logger.info("=== Saving Final Model ===")
+    logger.info("=== Saving Model ===")
     final_dir = output_dir / "final"
     trainer.save_model(str(final_dir))
     tokenizer.save_pretrained(str(final_dir))
     logger.info(f"Model saved to {final_dir}")
-
-    logger.info("=== Training Complete ===")
+    logger.info("=== Done ===")
 
 
 if __name__ == "__main__":

@@ -151,8 +151,8 @@ def evaluate_model(model, tokenizer, label="model"):
 
 
 def main():
-    adapter_path = ROOT / "outputs" / "smollm2-360m-cpp-lua" / "final"
-    base_model_id = "HuggingFaceTB/SmolLM2-360M"
+    adapter_path = ROOT / "outputs" / "smollm2-135m-cpp-lua" / "final"
+    base_model_id = "HuggingFaceTB/SmolLM2-135M"
 
     logger.info("Loading base model...")
     model, tokenizer = load_model(base_model_id)

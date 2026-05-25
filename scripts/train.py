@@ -25,6 +25,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).parent.parent
+HAS_CUDA = torch.cuda.is_available()
 
 
 def load_config():
@@ -55,42 +56,48 @@ def load_data():
 
 def setup_tokenizer(model_id):
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.pad_token_id = tokenizer.eos_token_id
-
     tokenizer.truncation_side = "left"
     return tokenizer
 
 
-def setup_model(cfg):
+def setup_model(cfg, tokenizer):
     model_cfg = cfg["model"]
     qlora_cfg = cfg["qlora"]
     lora_cfg = cfg["lora"]
 
     logger.info(f"Loading base model: {model_cfg['base_model_id']}")
+    logger.info(f"Device: {'CUDA' if HAS_CUDA else 'CPU'}")
 
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=qlora_cfg["load_in_4bit"],
-        bnb_4bit_quant_type=qlora_cfg["quant_type"],
-        bnb_4bit_compute_dtype=getattr(torch, qlora_cfg["bnb_4bit_compute_dtype"]),
-        bnb_4bit_use_double_quant=qlora_cfg["bnb_4bit_use_double_quant"],
-    )
+    dtype = getattr(torch, model_cfg["torch_dtype"])
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_cfg["base_model_id"],
-        quantization_config=bnb_config,
-        torch_dtype=getattr(torch, model_cfg["torch_dtype"]),
-        attn_implementation=model_cfg["attn_implementation"],
-        use_cache=model_cfg["use_cache"],
-        trust_remote_code=True,
-        device_map="auto",
-    )
-
-    model = prepare_model_for_kbit_training(model)
-    model.gradient_checkpointing_enable()
-    model.config.use_cache = False
+    if HAS_CUDA and qlora_cfg["enabled"]:
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=qlora_cfg["load_in_4bit"],
+            bnb_4bit_quant_type=qlora_cfg["quant_type"],
+            bnb_4bit_compute_dtype=getattr(torch, qlora_cfg["bnb_4bit_compute_dtype"]),
+            bnb_4bit_use_double_quant=qlora_cfg["bnb_4bit_use_double_quant"],
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            model_cfg["base_model_id"],
+            quantization_config=bnb_config,
+            torch_dtype=dtype,
+            attn_implementation=model_cfg["attn_implementation"],
+            use_cache=model_cfg["use_cache"],
+            trust_remote_code=True,
+            device_map="auto",
+        )
+        model = prepare_model_for_kbit_training(model)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_cfg["base_model_id"],
+            torch_dtype=dtype,
+            attn_implementation=model_cfg["attn_implementation"],
+            use_cache=model_cfg["use_cache"],
+            trust_remote_code=True,
+        )
 
     peft_config = LoraConfig(
         r=lora_cfg["r"],
@@ -104,7 +111,7 @@ def setup_model(cfg):
     model = get_peft_model(model, peft_config)
     model.print_trainable_parameters()
 
-    return model, tokenizer
+    return model
 
 
 def formatting_func(example):
@@ -121,8 +128,8 @@ def main():
     logger.info("=== Setting up Tokenizer ===")
     tokenizer = setup_tokenizer(cfg["model"]["base_model_id"])
 
-    logger.info("=== Setting up Model with QLoRA ===")
-    model, tokenizer = setup_model(cfg)
+    logger.info("=== Setting up Model ===")
+    model = setup_model(cfg, tokenizer)
 
     train_cfg = cfg["training"]
     output_dir = ROOT / train_cfg["output_dir"]
@@ -147,11 +154,12 @@ def main():
         load_best_model_at_end=train_cfg["load_best_model_at_end"],
         metric_for_best_model=train_cfg["metric_for_best_model"],
         greater_is_better=train_cfg["greater_is_better"],
-        bf16=train_cfg["bf16"],
-        tf32=train_cfg["tf32"],
+        bf16=train_cfg["bf16"] and HAS_CUDA,
+        tf32=train_cfg["tf32"] and HAS_CUDA,
+        fp16=not HAS_CUDA,
         dataloader_num_workers=train_cfg["dataloader_num_workers"],
         remove_unused_columns=train_cfg["remove_unused_columns"],
-        report_to=train_cfg["report_to"] if os.environ.get("WANDB_API_KEY") else "none",
+        report_to="none",
         run_name=train_cfg["run_name"],
         ddp_find_unused_parameters=False if torch.cuda.device_count() > 1 else None,
         logging_strategy="steps",
@@ -176,6 +184,7 @@ def main():
     )
 
     logger.info("=== Starting Training ===")
+    logger.info(f"Total trainable params: {model.num_parameters(only_trainable=True):,}")
     trainer.train()
 
     logger.info("=== Saving Final Model ===")

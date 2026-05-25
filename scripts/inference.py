@@ -101,7 +101,7 @@ def generate_code(
 
 def interactive_mode(model, tokenizer):
     print("\n" + "="*60)
-    print("C++/Lua Code Assistant (SmolLM2-360M)")
+    print("C++/Lua Code Assistant (SmolLM2-135M)")
     if not HAS_CUDA:
         print("⚠️  CPU mode — responses will be slow (30-120s per generation)")
     print("Commands: /lang cpp | /lang lua | /lang auto | exit")
@@ -141,10 +141,10 @@ def interactive_mode(model, tokenizer):
 def main():
     parser = argparse.ArgumentParser(description="C++/Lua Code Assistant Inference")
     parser.add_argument("--adapter", type=str,
-        default=str(ROOT / "outputs" / "smollm2-360m-cpp-lua" / "final"),
+        default=str(ROOT / "outputs" / "smollm2-135m-cpp-lua" / "final"),
         help="Path to LoRA adapter")
     parser.add_argument("--base-model", type=str,
-        default="HuggingFaceTB/SmolLM2-360M", help="Base model ID")
+        default="HuggingFaceTB/SmolLM2-135M", help="Base model ID")
     parser.add_argument("--prompt", type=str, default=None, help="Single prompt")
     parser.add_argument("--lang", type=str, default="auto",
         choices=["auto", "cpp", "lua"], help="Language hint")
